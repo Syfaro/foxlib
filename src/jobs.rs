@@ -309,7 +309,7 @@ impl FaktoryProducer {
 }
 
 /// Collect extra data to attach to the job.
-fn job_custom(existing: JobExtra) -> JobExtra {
+pub fn job_custom(existing: JobExtra) -> JobExtra {
     tracing_headers()
         .into_iter()
         .map(|(name, value)| (name, serde_json::Value::from(value)))
@@ -318,7 +318,7 @@ fn job_custom(existing: JobExtra) -> JobExtra {
 }
 
 /// Get tracing headers to associate with the job.
-fn tracing_headers() -> HashMap<String, String> {
+pub fn tracing_headers() -> HashMap<String, String> {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
     let mut headers = HashMap::with_capacity(2);
