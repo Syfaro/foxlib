@@ -9,3 +9,4 @@ pub mod jobs;
 pub mod hash;
 
 pub mod metrics;
+pub mod trace;

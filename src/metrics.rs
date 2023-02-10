@@ -6,10 +6,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Request, Response, Server, StatusCode,
 };
-use opentelemetry::{sdk::trace, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
 use prometheus::{Encoder, TextEncoder};
-use tracing_subscriber::prelude::*;
 
 /// Start a HTTP server on host to expose metrics endpoints.
 /// * `/health` always returns a 200 OK
@@ -40,50 +37,5 @@ async fn metrics(req: Request<Body>) -> Result<Response<Body>, Infallible> {
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             Ok(not_found)
         }
-    }
-}
-
-/// Configure tracing output format and span reporting.
-pub fn configure_tracing(
-    agent: &str,
-    namespace: &'static str,
-    name: &'static str,
-    version: &'static str,
-    json_logs: bool,
-) {
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(agent),
-        )
-        .with_trace_config(
-            trace::config()
-                .with_sampler(trace::Sampler::AlwaysOn)
-                .with_resource(opentelemetry::sdk::Resource::new(vec![
-                    KeyValue::new("service.namespace", namespace),
-                    KeyValue::new("service.name", name),
-                    KeyValue::new("service.version", version),
-                ])),
-        )
-        .install_batch(opentelemetry::runtime::Tokio)
-        .expect("could not create otlp tracer");
-
-    if json_logs {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().json())
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(tracing_subscriber::fmt::format().pretty()),
-            )
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .init();
     }
 }
