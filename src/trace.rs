@@ -35,9 +35,7 @@ pub struct TracingConfig {
 
 /// Initialize tracing.
 pub fn init(config: TracingConfig) {
-    opentelemetry::global::set_text_map_propagator(
-        opentelemetry::sdk::propagation::TraceContextPropagator::new(),
-    );
+    opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
 
     if config.otlp {
         let tracer = opentelemetry_otlp::new_pipeline()
