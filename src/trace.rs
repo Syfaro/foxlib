@@ -1,14 +1,14 @@
 //! Initialize app tracing and otel reporting.
 
-use std::marker::PhantomData;
+use std::{borrow::Cow, marker::PhantomData};
 
 use chrono::Utc;
 use opentelemetry::{
     sdk::{trace, Resource},
     trace::{SpanId, TraceContextExt},
-    KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_semantic_conventions as semcov;
 use serde::{ser::SerializeMap, Serialize, Serializer};
 use tracing::Subscriber;
 use tracing_log::NormalizeEvent;
@@ -37,14 +37,23 @@ pub struct TracingConfig {
 pub fn init(config: TracingConfig) {
     opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
 
+    let environment = if let Ok(environment) = std::env::var("DEPLOYMENT_ENVIRONMENT") {
+        Cow::from(environment)
+    } else if cfg!(debug_assertions) {
+        Cow::from("dev")
+    } else {
+        Cow::from("unknown")
+    };
+
     if config.otlp {
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_env())
-            .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                KeyValue::new("service.namespace", config.namespace),
-                KeyValue::new("service.name", config.name),
-                KeyValue::new("service.version", config.version),
+            .with_trace_config(trace::config().with_resource(Resource::new([
+                semcov::resource::SERVICE_NAMESPACE.string(config.namespace),
+                semcov::resource::SERVICE_NAME.string(config.name),
+                semcov::resource::SERVICE_VERSION.string(config.version),
+                semcov::resource::DEPLOYMENT_ENVIRONMENT.string(environment),
             ])))
             .install_batch(opentelemetry::runtime::Tokio)
             .expect("could not create otlp tracer");
