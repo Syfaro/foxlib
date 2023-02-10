@@ -10,3 +10,6 @@ pub mod hash;
 
 pub mod metrics;
 pub mod trace;
+
+pub use metrics::MetricsServer;
+pub use trace::{init as trace_init, TracingConfig};
