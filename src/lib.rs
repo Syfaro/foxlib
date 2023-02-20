@@ -8,6 +8,9 @@ pub mod jobs;
 #[cfg(feature = "hash")]
 pub mod hash;
 
+#[cfg(feature = "flags")]
+pub mod flags;
+
 pub mod metrics;
 pub mod trace;
 
