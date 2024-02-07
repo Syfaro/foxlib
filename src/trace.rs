@@ -3,11 +3,8 @@
 use std::{borrow::Cow, marker::PhantomData};
 
 use chrono::Utc;
-use opentelemetry::{
-    sdk::{trace, Resource},
-    trace::{SpanId, TraceContextExt},
-};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry::trace::{SpanId, TraceContextExt};
+use opentelemetry_sdk::{trace, Resource};
 use opentelemetry_semantic_conventions as semcov;
 use serde::{ser::SerializeMap, Serialize, Serializer};
 use tracing::Subscriber;
@@ -48,14 +45,14 @@ pub fn init(config: TracingConfig) {
     if config.otlp {
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic().with_env())
+            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
             .with_trace_config(trace::config().with_resource(Resource::new([
                 semcov::resource::SERVICE_NAMESPACE.string(config.namespace),
                 semcov::resource::SERVICE_NAME.string(config.name),
                 semcov::resource::SERVICE_VERSION.string(config.version),
                 semcov::resource::DEPLOYMENT_ENVIRONMENT.string(environment),
             ])))
-            .install_batch(opentelemetry::runtime::Tokio)
+            .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("could not create otlp tracer");
 
         tracing_subscriber::registry()

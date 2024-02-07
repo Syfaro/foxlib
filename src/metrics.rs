@@ -72,7 +72,7 @@ impl MetricsServer {
             }
             "/metrics" => {
                 let mut buffer = Vec::new();
-                TextEncoder::default()
+                TextEncoder
                     .encode(&prometheus::gather(), &mut buffer)
                     .expect("could not encode metrics");
 
