@@ -12,7 +12,15 @@ pub struct ImageHash(pub [u8; 8]);
 
 impl Default for ImageHasher {
     fn default() -> Self {
-        Self(get_hasher())
+        use img_hash::{HashAlg::Gradient, HasherConfig};
+
+        let hasher = HasherConfig::with_bytes_type::<[u8; 8]>()
+            .hash_alg(Gradient)
+            .hash_size(8, 8)
+            .preproc_dct()
+            .to_hasher();
+
+        Self(hasher)
     }
 }
 
@@ -47,15 +55,4 @@ impl From<i64> for ImageHash {
     fn from(value: i64) -> Self {
         Self(value.to_be_bytes())
     }
-}
-
-/// Get the hasher used by default in all FuzzySearch related projects.
-fn get_hasher() -> img_hash::Hasher<[u8; 8]> {
-    use img_hash::{HashAlg::Gradient, HasherConfig};
-
-    HasherConfig::with_bytes_type::<[u8; 8]>()
-        .hash_alg(Gradient)
-        .hash_size(8, 8)
-        .preproc_dct()
-        .to_hasher()
 }
