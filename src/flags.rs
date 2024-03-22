@@ -27,8 +27,8 @@ where
     let instance_id = Uuid::new_v4().to_string();
 
     let client: Unleash<F> = Arc::new(ClientBuilder::default().into_client(
-        &url,
-        &app_name,
+        url,
+        app_name,
         &instance_id,
         Some(secret),
     )?);

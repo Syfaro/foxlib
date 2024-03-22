@@ -43,9 +43,9 @@ impl Deref for ImageHash {
     }
 }
 
-impl Into<i64> for ImageHash {
-    fn into(self) -> i64 {
-        i64::from_be_bytes(self.0)
+impl From<ImageHash> for i64 {
+    fn from(val: ImageHash) -> i64 {
+        i64::from_be_bytes(val.0)
     }
 }
 

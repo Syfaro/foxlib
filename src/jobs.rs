@@ -281,7 +281,7 @@ impl FaktoryProducer {
         let job_id = job.id().to_owned();
 
         tracing::Span::current()
-            .record("name", &J::NAME)
+            .record("name", J::NAME)
             .record("queue", &job.queue)
             .record("job_id", &job_id);
 
