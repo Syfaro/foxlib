@@ -5,14 +5,14 @@ use std::ops::Deref;
 pub use image;
 
 /// A tool for creating perceptual image hashes.
-pub struct ImageHasher(img_hash::Hasher<[u8; 8]>);
+pub struct ImageHasher(image_hasher::Hasher<[u8; 8]>);
 
 /// A perceptual image hash.
 pub struct ImageHash(pub [u8; 8]);
 
 impl Default for ImageHasher {
     fn default() -> Self {
-        use img_hash::{HashAlg::Gradient, HasherConfig};
+        use image_hasher::{HashAlg::Gradient, HasherConfig};
 
         let hasher = HasherConfig::with_bytes_type::<[u8; 8]>()
             .hash_alg(Gradient)
@@ -28,12 +28,10 @@ impl ImageHasher {
     /// Hash an image.
     pub fn hash_image<I>(&self, im: &I) -> ImageHash
     where
-        I: img_hash::Image,
+        I: image_hasher::Image,
     {
         let hash = self.0.hash_image(im);
-        let bytes: [u8; 8] = hash.as_bytes().try_into().unwrap();
-
-        ImageHash(bytes)
+        ImageHash(hash.into_inner())
     }
 }
 

@@ -7,7 +7,7 @@ version = "0.1.0"
 
 [features]
 default = []
-hash = ["image", "img_hash"]
+hash = ["image", "image_hasher"]
 jobs = ["faktory"]
 
 flags = ["unleash-api-client", "enum-map", "uuid"]
@@ -22,8 +22,8 @@ chrono = "0.4.23"
 enum-map = { version = "2.0.3", optional = true }
 faktory = { version = "0.12.1", optional = true }
 hyper = { version = "0.14.24", features = ["http1", "tcp", "server"] }
-image = { version = "0.23.14", optional = true }
-img_hash = { version = "3.2.0", optional = true }
+image = { version = "0.25.0", optional = true }
+image_hasher = { version = "2.0.0", optional = true }
 lazy_static = "1.4.0"
 opentelemetry = "0.21.0"
 opentelemetry-http = "0.10.0"
