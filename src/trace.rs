@@ -32,7 +32,9 @@ pub struct TracingConfig {
 
 /// Initialize tracing.
 pub fn init(config: TracingConfig) {
-    opentelemetry::global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
 
     let environment = if let Ok(environment) = std::env::var("DEPLOYMENT_ENVIRONMENT") {
         Cow::from(environment)
