@@ -1,6 +1,6 @@
 //! Initialize app tracing and otel reporting.
 
-use std::{borrow::Cow, marker::PhantomData};
+use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
 
 use chrono::Utc;
 use opentelemetry::trace::{SpanId, TraceContextExt};
@@ -76,6 +76,21 @@ pub fn init(config: TracingConfig) {
             .init();
     }
 }
+
+/// Get tracing headers to associate with the job.
+pub fn tracing_headers() -> HashMap<String, String> {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let mut headers = HashMap::with_capacity(2);
+    let cx = tracing::Span::current().context();
+
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut headers)
+    });
+
+    headers
+}
+
 
 struct TraceInfo {
     trace_id: String,

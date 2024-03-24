@@ -310,23 +310,9 @@ impl FaktoryProducer {
 
 /// Collect extra data to attach to the job.
 pub fn job_custom(existing: JobExtra) -> JobExtra {
-    tracing_headers()
+    crate::trace::tracing_headers()
         .into_iter()
         .map(|(name, value)| (name, serde_json::Value::from(value)))
         .chain(existing)
         .collect()
-}
-
-/// Get tracing headers to associate with the job.
-pub fn tracing_headers() -> HashMap<String, String> {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-    let mut headers = HashMap::with_capacity(2);
-    let cx = tracing::Span::current().context();
-
-    opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&cx, &mut headers)
-    });
-
-    headers
 }
