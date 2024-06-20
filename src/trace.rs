@@ -3,7 +3,10 @@
 use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
 
 use chrono::Utc;
-use opentelemetry::trace::{SpanId, TraceContextExt};
+use opentelemetry::{
+    trace::{SpanId, TraceContextExt},
+    KeyValue,
+};
 use opentelemetry_sdk::{trace, Resource};
 use opentelemetry_semantic_conventions as semcov;
 use serde::{ser::SerializeMap, Serialize, Serializer};
@@ -49,10 +52,10 @@ pub fn init(config: TracingConfig) {
             .tracing()
             .with_exporter(opentelemetry_otlp::new_exporter().tonic())
             .with_trace_config(trace::config().with_resource(Resource::new([
-                semcov::resource::SERVICE_NAMESPACE.string(config.namespace),
-                semcov::resource::SERVICE_NAME.string(config.name),
-                semcov::resource::SERVICE_VERSION.string(config.version),
-                semcov::resource::DEPLOYMENT_ENVIRONMENT.string(environment),
+                KeyValue::new(semcov::resource::SERVICE_NAMESPACE, config.namespace),
+                KeyValue::new(semcov::resource::SERVICE_NAME, config.name),
+                KeyValue::new(semcov::resource::SERVICE_VERSION, config.version),
+                KeyValue::new(semcov::resource::DEPLOYMENT_ENVIRONMENT, environment),
             ])))
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("could not create otlp tracer");
@@ -90,7 +93,6 @@ pub fn tracing_headers() -> HashMap<String, String> {
 
     headers
 }
-
 
 struct TraceInfo {
     trace_id: String,
