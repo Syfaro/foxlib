@@ -1,7 +1,6 @@
 //! Utilities to expose standard metrics.
 
 use std::{
-    convert::Infallible,
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -9,11 +8,11 @@ use std::{
     },
 };
 
-use hyper::{
-    service::{make_service_fn, service_fn},
-    Body, Request, Response, Server, StatusCode,
+use axum::{
+    extract::State, http::header, http::StatusCode, response::IntoResponse, routing::get, Router,
 };
 use prometheus::{Encoder, TextEncoder};
+use tokio::net::TcpListener;
 
 /// Manage a HTTP server on host to expose metrics endpoints.
 /// * `/health/live` always returns a 200 OK
@@ -30,7 +29,20 @@ impl MetricsServer {
             ready: AtomicBool::new(ready),
         });
 
-        Self::start_server(metrics_server.clone(), host).await;
+        let router = Router::new()
+            .route("/health/live", get(|| async { "OK" }))
+            .route("/health/ready", get(Self::ready))
+            .route("/metrics", get(Self::metrics))
+            .with_state(metrics_server.clone());
+
+        let listener = TcpListener::bind(host)
+            .await
+            .expect("could not bind metrics server");
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("metrics server failure");
+        });
 
         metrics_server
     }
@@ -40,49 +52,24 @@ impl MetricsServer {
         self.ready.store(ready, Ordering::Relaxed);
     }
 
-    async fn start_server(metrics_server: Arc<Self>, host: SocketAddr) {
-        let make_svc = make_service_fn(move |_conn| {
-            let metrics_server = metrics_server.clone();
-
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    let metrics_server = metrics_server.clone();
-                    async move { metrics_server.handler(req).await }
-                }))
-            }
-        });
-
-        let server = Server::bind(&host).serve(make_svc);
-
-        tokio::spawn(async move {
-            server.await.expect("metrics server failure");
-        });
+    async fn ready(State(server): State<Arc<Self>>) -> impl IntoResponse {
+        if server.ready.load(Ordering::Relaxed) {
+            (StatusCode::OK, "READY")
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, "NOT READY")
+        }
     }
 
-    async fn handler(&self, req: Request<Body>) -> Result<Response<Body>, Infallible> {
-        match req.uri().path() {
-            "/health/live" => Ok(Response::new(Body::from("OK"))),
-            "/health/ready" if self.ready.load(Ordering::Relaxed) => {
-                Ok(Response::new(Body::from("READY")))
-            }
-            "/health/ready" => {
-                let mut resp = Response::new(Body::from("NOT READY"));
-                *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                Ok(resp)
-            }
-            "/metrics" => {
-                let mut buffer = Vec::new();
-                TextEncoder
-                    .encode(&prometheus::gather(), &mut buffer)
-                    .expect("could not encode metrics");
+    async fn metrics() -> impl IntoResponse {
+        let encoder = TextEncoder::new();
+        let mut buffer = Vec::new();
+        encoder
+            .encode(&prometheus::gather(), &mut buffer)
+            .expect("could not encode metrics");
 
-                Ok(Response::new(Body::from(buffer)))
-            }
-            _ => {
-                let mut not_found = Response::new(Body::default());
-                *not_found.status_mut() = StatusCode::NOT_FOUND;
-                Ok(not_found)
-            }
-        }
+        (
+            [(header::CONTENT_TYPE, encoder.format_type().to_owned())],
+            buffer,
+        )
     }
 }
