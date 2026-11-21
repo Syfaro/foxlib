@@ -1,18 +1,17 @@
 //! Initialize app tracing and otel reporting.
 
-use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
+use std::{borrow::Cow, collections::HashMap, marker::PhantomData, sync::OnceLock};
 
 use chrono::Utc;
 use opentelemetry::{
-    trace::{SpanId, TraceContextExt, TraceId},
+    trace::{TraceContextExt, TracerProvider as _},
     KeyValue,
 };
-use opentelemetry_sdk::{trace, Resource};
-use opentelemetry_semantic_conventions as semcov;
+use opentelemetry_sdk::{trace::SdkTracerProvider, Resource};
 use serde::{ser::SerializeMap, Serialize, Serializer};
 use tracing::Subscriber;
 use tracing_log::NormalizeEvent;
-use tracing_opentelemetry::OtelData;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_serde::{fields::AsMap, AsSerde};
 use tracing_subscriber::{
     fmt::{FormatEvent, FormatFields, FormattedFields},
@@ -33,6 +32,8 @@ pub struct TracingConfig {
     pub otlp: bool,
 }
 
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
 /// Initialize tracing.
 pub fn init(config: TracingConfig) {
     opentelemetry::global::set_text_map_propagator(
@@ -48,17 +49,25 @@ pub fn init(config: TracingConfig) {
     };
 
     if config.otlp {
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_trace_config(trace::config().with_resource(Resource::new([
-                KeyValue::new(semcov::resource::SERVICE_NAMESPACE, config.namespace),
-                KeyValue::new(semcov::resource::SERVICE_NAME, config.name),
-                KeyValue::new(semcov::resource::SERVICE_VERSION, config.version),
-                KeyValue::new(semcov::resource::DEPLOYMENT_ENVIRONMENT, environment),
-            ])))
-            .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .expect("could not create otlp tracer");
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .build()
+            .expect("could not create otlp exporter");
+        let resource = Resource::builder()
+            .with_service_name(config.name)
+            .with_attributes([
+                KeyValue::new("service.namespace", config.namespace),
+                KeyValue::new("service.version", config.version),
+                KeyValue::new("deployment.environment.name", environment),
+            ])
+            .build();
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource)
+            .build();
+        let tracer = provider.tracer(config.name);
+        opentelemetry::global::set_tracer_provider(provider.clone());
+        let _ = TRACER_PROVIDER.set(provider);
 
         tracing_subscriber::registry()
             .with(
@@ -80,10 +89,17 @@ pub fn init(config: TracingConfig) {
     }
 }
 
+/// Send any spans still queued and stop exporting.
+pub fn shutdown() {
+    if let Some(provider) = TRACER_PROVIDER.get() {
+        if let Err(err) = provider.shutdown() {
+            eprintln!("could not shut down tracer provider: {err}");
+        }
+    }
+}
+
 /// Get tracing headers to associate with the job.
 pub fn tracing_headers() -> HashMap<String, String> {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-
     let mut headers = HashMap::with_capacity(2);
     let cx = tracing::Span::current().context();
 
@@ -102,22 +118,14 @@ struct TraceInfo {
 struct TraceIdFormat;
 
 impl TraceIdFormat {
-    fn lookup_trace_info<S>(span_ref: &SpanRef<S>) -> Option<TraceInfo>
-    where
-        S: Subscriber + for<'a> LookupSpan<'a>,
-    {
-        span_ref.extensions().get::<OtelData>().map(|o| {
-            let parent_trace_id = o.parent_cx.span().span_context().trace_id();
-            let trace_id = if parent_trace_id != TraceId::INVALID {
-                parent_trace_id
-            } else {
-                o.builder.trace_id.unwrap_or(TraceId::INVALID)
-            };
+    fn current_trace_info() -> Option<TraceInfo> {
+        let cx = tracing::Span::current().context();
+        let span = cx.span();
+        let span_context = span.span_context();
 
-            TraceInfo {
-                trace_id: trace_id.to_string(),
-                span_id: o.builder.span_id.unwrap_or(SpanId::INVALID).to_string(),
-            }
+        span_context.is_valid().then(|| TraceInfo {
+            trace_id: span_context.trace_id().to_string(),
+            span_id: span_context.span_id().to_string(),
         })
     }
 }
@@ -155,7 +163,7 @@ where
                     &SerializableContext(span_ref, format_field_marker),
                 )?;
 
-                if let Some(trace_info) = Self::lookup_trace_info(span_ref) {
+                if let Some(trace_info) = Self::current_trace_info() {
                     serializer.serialize_entry("span_id", &trace_info.span_id)?;
                     serializer.serialize_entry("trace_id", &trace_info.trace_id)?;
                 }

@@ -153,7 +153,9 @@ where
             let span = tracing::info_span!("faktory_job", name = J::NAME, queue = %job.queue, job_id = %job.id());
 
             let cx = Self::extract_context(&job);
-            tracing_opentelemetry::OpenTelemetrySpanExt::set_parent(&span, cx);
+            if let Err(err) = tracing_opentelemetry::OpenTelemetrySpanExt::set_parent(&span, cx) {
+                tracing::warn!("could not continue the job's trace: {err:?}");
+            }
 
             let _guard = span.entered();
 
