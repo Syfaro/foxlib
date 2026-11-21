@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
 
 use chrono::Utc;
 use opentelemetry::{
-    trace::{SpanId, TraceContextExt},
+    trace::{SpanId, TraceContextExt, TraceId},
     KeyValue,
 };
 use opentelemetry_sdk::{trace, Resource};
@@ -106,9 +106,18 @@ impl TraceIdFormat {
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        span_ref.extensions().get::<OtelData>().map(|o| TraceInfo {
-            trace_id: o.parent_cx.span().span_context().trace_id().to_string(),
-            span_id: o.builder.span_id.unwrap_or(SpanId::INVALID).to_string(),
+        span_ref.extensions().get::<OtelData>().map(|o| {
+            let parent_trace_id = o.parent_cx.span().span_context().trace_id();
+            let trace_id = if parent_trace_id != TraceId::INVALID {
+                parent_trace_id
+            } else {
+                o.builder.trace_id.unwrap_or(TraceId::INVALID)
+            };
+
+            TraceInfo {
+                trace_id: trace_id.to_string(),
+                span_id: o.builder.span_id.unwrap_or(SpanId::INVALID).to_string(),
+            }
         })
     }
 }
