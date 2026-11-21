@@ -12,7 +12,7 @@ use std::{
 pub use faktory::Job as FaktoryJob;
 use lazy_static::lazy_static;
 use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
-use tracing::{instrument, Instrument};
+use tracing::Instrument;
 
 lazy_static! {
     static ref JOB_EXECUTION_TIME: HistogramVec = register_histogram_vec!(
@@ -143,14 +143,23 @@ where
         F: 'static + Send + Sync + Fn(C, FaktoryJob, J::Data) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
-        tracing::info!(name = J::NAME, "registering handler");
+        tracing::info!(faktory.job.type = J::NAME, "registering handler");
 
         let rt = self.rt.clone();
         let context = self.context.clone();
         let middlewares = self.middlewares.clone();
 
         let handler = move |job: FaktoryJob| -> Result<(), E> {
-            let span = tracing::info_span!("faktory_job", name = J::NAME, queue = %job.queue, job_id = %job.id());
+            let span = tracing::info_span!(
+                "faktory_job",
+                otel.name = %format!("process {}", job.queue),
+                otel.kind = "consumer",
+                messaging.system = "faktory",
+                messaging.operation.type = "process",
+                messaging.destination.name = %job.queue,
+                messaging.message.id = %job.id(),
+                faktory.job.type = J::NAME,
+            );
 
             let cx = Self::extract_context(&job);
             if let Err(err) = tracing_opentelemetry::OpenTelemetrySpanExt::set_parent(&span, cx) {
@@ -268,7 +277,6 @@ impl FaktoryProducer {
     }
 
     /// Enqueue a new job to be run at an optionally provided time.
-    #[instrument(err, skip(self, job, at), fields(job_id, name, queue))]
     pub async fn enqueue_job_at<J>(
         &self,
         job: J,
@@ -277,23 +285,42 @@ impl FaktoryProducer {
     where
         J: Job,
     {
-        let mut job = job.job()?;
-        job.at = at;
+        let queue = job.queue().queue_name();
+        let span = tracing::info_span!(
+            "faktory_enqueue",
+            otel.name = %format!("send {queue}"),
+            otel.kind = "producer",
+            messaging.system = "faktory",
+            messaging.operation.type = "send",
+            messaging.destination.name = %queue,
+            messaging.message.id = tracing::field::Empty,
+            faktory.job.type = J::NAME,
+        );
 
-        let job_id = job.id().to_owned();
+        async move {
+            let result: Result<String, Error> = async {
+                let mut job = job.job()?;
+                job.at = at;
 
-        tracing::Span::current()
-            .record("name", J::NAME)
-            .record("queue", &job.queue)
-            .record("job_id", &job_id);
+                let job_id = job.id().to_owned();
+                tracing::Span::current().record("messaging.message.id", &job_id);
 
-        tracing::debug!("attempting to enqueue job with args {:?}", job.args());
+                tracing::debug!("attempting to enqueue job with args {:?}", job.args());
+                self.enqueue_existing_job(job).await?;
+                tracing::info!("enqueued job");
 
-        self.enqueue_existing_job(job).await?;
+                Ok(job_id)
+            }
+            .await;
 
-        tracing::info!("enqueued job");
+            if let Err(ref err) = result {
+                tracing::error!("could not enqueue job: {err}");
+            }
 
-        Ok(job_id)
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     /// Enqueue a job that was already converted to a `FaktoryJob`.

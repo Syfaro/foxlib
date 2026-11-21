@@ -1,92 +1,88 @@
 //! Initialize app tracing and otel reporting.
 
-use std::{borrow::Cow, collections::HashMap, marker::PhantomData, sync::OnceLock};
+use std::{collections::HashMap, sync::OnceLock};
 
-use chrono::Utc;
 use opentelemetry::{
+    propagation::TextMapCompositePropagator,
     trace::{TraceContextExt, TracerProvider as _},
     KeyValue,
 };
-use opentelemetry_sdk::{trace::SdkTracerProvider, Resource};
-use serde::{ser::SerializeMap, Serialize, Serializer};
-use tracing::Subscriber;
-use tracing_log::NormalizeEvent;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_serde::{fields::AsMap, AsSerde};
-use tracing_subscriber::{
-    fmt::{FormatEvent, FormatFields, FormattedFields},
-    prelude::*,
-    registry::{LookupSpan, SpanRef},
+use opentelemetry_sdk::{
+    propagation::{BaggagePropagator, TraceContextPropagator},
+    resource::{EnvResourceDetector, ResourceDetector, TelemetryResourceDetector},
+    trace::SdkTracerProvider,
+    Resource,
 };
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// Configuration for tracing.
 pub struct TracingConfig {
-    /// Resource namespace.
+    /// Resource namespace (`service.namespace`).
     pub namespace: &'static str,
-    /// Resource name.
+    /// Resource name (`service.name`).
     pub name: &'static str,
-    /// Resource version.
+    /// Resource version (`service.version`).
     pub version: &'static str,
 
-    /// If logs should be output in JSON format and traces sent to otlp pipeline.
-    pub otlp: bool,
+    /// If logs should be output as JSON instead of human-readable text.
+    pub json_logs: bool,
 }
+
+const UNTRACED: &[&str] = &[
+    "h2",
+    "hyper",
+    "hyper_util",
+    "tonic",
+    "tower",
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry_otlp",
+];
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Initialize tracing.
 pub fn init(config: TracingConfig) {
-    opentelemetry::global::set_text_map_propagator(
-        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-    );
+    opentelemetry::global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]));
 
-    let environment = if let Ok(environment) = std::env::var("DEPLOYMENT_ENVIRONMENT") {
-        Cow::from(environment)
-    } else if cfg!(debug_assertions) {
-        Cow::from("dev")
+    let log_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let logs = if config.json_logs {
+        let mut json = json_subscriber::fmt::layer()
+            .flatten_event(true)
+            .with_current_span(false);
+        json.inner_layer_mut()
+            .add_dynamic_field("trace_id", |_, _| {
+                current_span_context().map(|cx| cx.trace_id().to_string())
+            });
+        json.inner_layer_mut().add_dynamic_field("span_id", |_, _| {
+            current_span_context().map(|cx| cx.span_id().to_string())
+        });
+        json.with_filter(log_filter).boxed()
     } else {
-        Cow::from("unknown")
+        tracing_subscriber::fmt::layer()
+            .with_filter(log_filter)
+            .boxed()
     };
 
-    if config.otlp {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .build()
-            .expect("could not create otlp exporter");
-        let resource = Resource::builder()
-            .with_service_name(config.name)
-            .with_attributes([
-                KeyValue::new("service.namespace", config.namespace),
-                KeyValue::new("service.version", config.version),
-                KeyValue::new("deployment.environment.name", environment),
-            ])
-            .build();
-        let provider = SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(resource)
-            .build();
+    let traces = otlp_enabled().then(|| {
+        let provider = tracer_provider(&config);
         let tracer = provider.tracer(config.name);
         opentelemetry::global::set_tracer_provider(provider.clone());
         let _ = TRACER_PROVIDER.set(provider);
 
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .event_format(TraceIdFormat),
-            )
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(tracing_subscriber::fmt::format().pretty()),
-            )
-            .with(tracing_subscriber::EnvFilter::from_default_env())
-            .init();
-    }
+        tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(trace_filter())
+    });
+
+    tracing_subscriber::registry()
+        .with(logs)
+        .with(traces)
+        .init();
 }
 
 /// Send any spans still queued and stop exporting.
@@ -110,161 +106,65 @@ pub fn tracing_headers() -> HashMap<String, String> {
     headers
 }
 
-struct TraceInfo {
-    trace_id: String,
-    span_id: String,
+fn otlp_enabled() -> bool {
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let is = |name, expected: &str| {
+        std::env::var(name).is_ok_and(|value| value.trim().eq_ignore_ascii_case(expected))
+    };
+
+    !is("OTEL_SDK_DISABLED", "true")
+        && !is("OTEL_TRACES_EXPORTER", "none")
+        && (set("OTEL_EXPORTER_OTLP_ENDPOINT") || set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
 }
 
-struct TraceIdFormat;
-
-impl TraceIdFormat {
-    fn current_trace_info() -> Option<TraceInfo> {
-        let cx = tracing::Span::current().context();
-        let span = cx.span();
-        let span_context = span.span_context();
-
-        span_context.is_valid().then(|| TraceInfo {
-            trace_id: span_context.trace_id().to_string(),
-            span_id: span_context.span_id().to_string(),
-        })
-    }
+fn trace_filter() -> EnvFilter {
+    UNTRACED.iter().fold(
+        EnvFilter::try_from_env("RUST_TRACE").unwrap_or_else(|_| EnvFilter::new("info")),
+        |filter, target| {
+            filter.add_directive(format!("{target}=off").parse().expect("valid directive"))
+        },
+    )
 }
 
-impl<S, N> FormatEvent<S, N> for TraceIdFormat
-where
-    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static,
-{
-    fn format_event(
-        &self,
-        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
-        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
-        event: &tracing::Event<'_>,
-    ) -> std::fmt::Result {
-        let normalized_meta = event.normalized_metadata();
-        let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
+fn tracer_provider(config: &TracingConfig) -> SdkTracerProvider {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .build()
+        .expect("could not create otlp exporter");
 
-        let mut visit = || {
-            let mut serializer = serde_json::Serializer::new(WriteAdaptor::new(&mut writer));
-            let mut serializer = serializer.serialize_map(None)?;
-            serializer.serialize_entry("timestamp", &Utc::now().to_rfc3339())?;
-            serializer.serialize_entry("level", &meta.level().as_serde())?;
-            serializer.serialize_entry("fields", &event.field_map())?;
-            serializer.serialize_entry("target", meta.target())?;
-
-            if let Some(ref span_ref) = ctx.lookup_current() {
-                let format_field_marker = PhantomData::<N>;
-
-                serializer
-                    .serialize_entry("span", &SerializableSpan(span_ref, format_field_marker))?;
-
-                serializer.serialize_entry(
-                    "spans",
-                    &SerializableContext(span_ref, format_field_marker),
-                )?;
-
-                if let Some(trace_info) = Self::current_trace_info() {
-                    serializer.serialize_entry("span_id", &trace_info.span_id)?;
-                    serializer.serialize_entry("trace_id", &trace_info.trace_id)?;
-                }
-            }
-
-            serializer.end()
-        };
-
-        visit().map_err(|_err| std::fmt::Error)?;
-        writeln!(writer)
-    }
+    SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource(config))
+        .build()
 }
 
-struct SerializableContext<'a, 'b, Span, N>(&'b SpanRef<'a, Span>, PhantomData<N>)
-where
-    Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static;
+fn resource(config: &TracingConfig) -> Resource {
+    let mut builder = Resource::builder_empty()
+        .with_service_name(config.name)
+        .with_attributes([
+            KeyValue::new("service.namespace", config.namespace),
+            KeyValue::new("service.version", config.version),
+        ]);
 
-impl<'a, 'b, Span, N> Serialize for SerializableContext<'a, 'b, Span, N>
-where
-    Span: Subscriber + for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeSeq;
-        let mut serializer = serializer.serialize_seq(None)?;
+    let detectors: [Box<dyn ResourceDetector>; 2] = [
+        Box::new(TelemetryResourceDetector),
+        Box::new(EnvResourceDetector::new()),
+    ];
+    builder = builder.with_detectors(&detectors);
 
-        for span in self.0.scope().from_root() {
-            serializer.serialize_element(&SerializableSpan(&span, self.1))?;
-        }
-
-        serializer.end()
+    if let Some(name) = non_empty_env("OTEL_SERVICE_NAME") {
+        builder = builder.with_service_name(name);
     }
+
+    builder.build()
 }
 
-struct SerializableSpan<'a, 'b, Span, N>(&'b SpanRef<'a, Span>, PhantomData<N>)
-where
-    Span: for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static;
-
-impl<'a, 'b, Span, N> Serialize for SerializableSpan<'a, 'b, Span, N>
-where
-    Span: for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut serializer = serializer.serialize_map(None)?;
-
-        let ext = self.0.extensions();
-        let data = ext.get::<FormattedFields<N>>().unwrap();
-
-        match serde_json::from_str(data) {
-            Ok(serde_json::Value::Object(fields)) => {
-                for (key, value) in fields {
-                    serializer.serialize_entry(&key, &value)?;
-                }
-            }
-            Ok(value) => {
-                serializer.serialize_entry("field", &value)?;
-                serializer.serialize_entry("field_error", "field was not valid object")?;
-            }
-            Err(err) => {
-                serializer.serialize_entry("field_error", &err.to_string())?;
-            }
-        }
-
-        serializer.serialize_entry("name", self.0.metadata().name())?;
-        serializer.end()
-    }
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// A wrapper type to allow
-struct WriteAdaptor<'a, W: std::fmt::Write> {
-    fmt_write: &'a mut W,
-}
-
-impl<'a, W: std::fmt::Write> WriteAdaptor<'a, W> {
-    pub fn new(fmt_write: &'a mut W) -> Self {
-        Self { fmt_write }
-    }
-}
-
-impl<'a, W: std::fmt::Write> std::io::Write for WriteAdaptor<'a, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let s = std::str::from_utf8(buf)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-
-        self.fmt_write
-            .write_str(s)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-
-        Ok(s.as_bytes().len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+fn current_span_context() -> Option<opentelemetry::trace::SpanContext> {
+    let cx = opentelemetry::Context::current();
+    let span_context = cx.span().span_context().clone();
+    span_context.is_valid().then_some(span_context)
 }
